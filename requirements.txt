@@ -1,0 +1,11 @@
+# REST API interactions
+requests==2.31.0
+
+# Data manipulation and cleaning
+pandas==2.2.0
+
+# Microsoft Azure SQL Database connectivity
+pyodbc==5.1.0
+
+# Environment variable management (for API keys and DB passwords)
+python-dotenv==1.0.1
