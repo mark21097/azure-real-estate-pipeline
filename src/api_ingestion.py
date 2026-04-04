@@ -3,12 +3,23 @@ import pandas as pd
 import os
 import time
 from dotenv import load_dotenv
+import logging
+
+# Set up Logging to catch issues during API calls
+log_path = os.path.join(os.path.dirname(__file__), '..', 'data', 'pipeline.log')
+logging.basicConfig(
+    filename=log_path,
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
 
 load_dotenv()
 api_key = os.getenv("API_KEY")
 
 def fetch_loopnet_data():
-    print("Step 1: Fetching listing IDs from the map search...")
+    
+    logging.info("Fetching listing IDs from the map search...")
     
     # 1. First Endpoint: Get the IDs
     search_url = "https://loopnet-api.p.rapidapi.com/loopnet/sale/searchByCity"
@@ -27,8 +38,8 @@ def fetch_loopnet_data():
         listings = data.get('data', data.get('results', data))
         
         # We grab just the top 5 so we don't hit the free-tier API rate limit
-        top_listings = listings[:5] 
-        print(f"✅ Found {len(listings)} listings. Extracting details for the top {len(top_listings)}...")
+        top_listings = listings[:50]
+        logging.info(f"✅ Found {len(listings)} listings. Extracting details for the top {len(top_listings)}...")
 
         enriched_data = []
         
@@ -39,7 +50,7 @@ def fetch_loopnet_data():
             listing_id = str(item.get('listingId'))
             coords = str(item.get('coordinations', ''))
             
-            print(f"  -> Fetching details for Listing ID: {listing_id}")
+            logging.info(f"  -> Fetching details for Listing ID: {listing_id}")
             
             detail_payload = {"listingId": listing_id}
             detail_response = requests.post(details_url, json=detail_payload, headers=headers)
@@ -84,15 +95,22 @@ def fetch_loopnet_data():
             
             # --- NEW: LAT/LONG PARSING ---
             # Remove the brackets [[ ]]
+            # --- NEW: BULLETPROOF LAT/LONG PARSING ---
+            # Remove the brackets [[ ]]
             df['Coordinates'] = df['Coordinates'].astype(str).str.replace('[', '', regex=False).str.replace(']', '', regex=False)
             
-            # Split the string by the comma into two columns
-            # LoopNet format is usually [Longitude, Latitude]
-            df[['Longitude', 'Latitude']] = df['Coordinates'].str.split(',', expand=True)
+            # Split the string by the comma into a temporary dataframe
+            # This handles polygons by letting Pandas make as many columns as it needs
+            coords_split = df['Coordinates'].str.split(',', expand=True)
             
-            # Convert to float so Power BI can map them
-            df['Longitude'] = pd.to_numeric(df['Longitude'], errors='coerce')
-            df['Latitude'] = pd.to_numeric(df['Latitude'], errors='coerce')
+            # Safely grab ONLY the first two columns (Index 0 = Longitude, Index 1 = Latitude)
+            df['Longitude'] = pd.to_numeric(coords_split[0], errors='coerce')
+            
+            # Use an 'if' statement just in case a property has completely empty coordinates
+            if 1 in coords_split.columns:
+                df['Latitude'] = pd.to_numeric(coords_split[1], errors='coerce')
+            else:
+                df['Latitude'] = None
             # -----------------------------
             
             # --- NEW: SAVE TO LOCAL STAGING ---
@@ -102,16 +120,16 @@ def fetch_loopnet_data():
             # Save as CSV (you can also use .to_parquet('.../raw_listings.parquet'))
             file_path = os.path.join(os.path.dirname(__file__), '..', 'data', 'raw_listings.csv')
             df.to_csv(file_path, index=False)
-            print(f"📁 Data staged locally at: {file_path}")
+            logging.info(f"📁 Data staged locally at: {file_path}")
             # ----------------------------------
             
-            print(f"✅ Pipeline complete! Enriched {len(df)} commercial listings.")
+            logging.info(f"✅ Pipeline complete! Enriched {len(df)} commercial listings.")
             return df
         else:
             return None
 
     except Exception as e:
-        print(f"❌ Error fetching data: {e}")
+        logging.error(f"❌ Error fetching data: {e}")
         return None
 
 if __name__ == "__main__":
