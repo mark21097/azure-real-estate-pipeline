@@ -1,24 +1,18 @@
 import requests
 import pandas as pd
 import os
+import time
 from dotenv import load_dotenv
 
-# Load credentials from the .env file
 load_dotenv()
 api_key = os.getenv("API_KEY")
 
 def fetch_loopnet_data():
-    print("Connecting to LoopNet API...")
+    print("Step 1: Fetching listing IDs from the map search...")
     
-    # Updated URL based on your RapidAPI snippet
-    url = "https://loopnet-api.p.rapidapi.com/loopnet/sale/searchByCity"
-    
-    # Updated payload based on your RapidAPI snippet
-    payload = {
-        "cityId": "11854", 
-        "page": 1
-    }
-
+    # 1. First Endpoint: Get the IDs
+    search_url = "https://loopnet-api.p.rapidapi.com/loopnet/sale/searchByCity"
+    search_payload = {"cityId": "11854", "page": 1}
     headers = {
         "content-type": "application/json",
         "X-RapidAPI-Key": api_key,
@@ -26,27 +20,94 @@ def fetch_loopnet_data():
     }
 
     try:
-        response = requests.post(url, json=payload, headers=headers)
+        response = requests.post(search_url, json=search_payload, headers=headers)
         response.raise_for_status()
         data = response.json()
         
-        # Extract the list of properties. (We default to 'data' or 'results' depending on LoopNet's exact JSON structure)
-        # If it fails, the script will print the raw JSON so we can see what key we need to use.
-        if 'data' in data:
-            listings = data['data']
-        elif 'results' in data:
-            listings = data['results']
-        else:
-            listings = data # Fallback
+        listings = data.get('data', data.get('results', data))
+        
+        # We grab just the top 5 so we don't hit the free-tier API rate limit
+        top_listings = listings[:5] 
+        print(f"✅ Found {len(listings)} listings. Extracting details for the top {len(top_listings)}...")
+
+        enriched_data = []
+        
+        # 2. Second Endpoint: Get the Details for each ID
+        details_url = "https://loopnet-api.p.rapidapi.com/loopnet/property/SaleDetails"
+
+        for item in top_listings:
+            listing_id = str(item.get('listingId'))
+            coords = str(item.get('coordinations', ''))
             
-        df = pd.DataFrame(listings)
+            print(f"  -> Fetching details for Listing ID: {listing_id}")
+            
+            detail_payload = {"listingId": listing_id}
+            detail_response = requests.post(details_url, json=detail_payload, headers=headers)
+            
+            if detail_response.status_code == 200:
+                detail_data = detail_response.json()
+                
+                # Unwrap the data
+                if isinstance(detail_data, dict):
+                    if 'data' in detail_data:
+                        detail_data = detail_data['data']
+                    elif 'results' in detail_data:
+                        detail_data = detail_data['results']
+                        
+                if isinstance(detail_data, list):
+                    prop = detail_data[0] if len(detail_data) > 0 else {}
+                else:
+                    prop = detail_data
+                    
+                if not isinstance(prop, dict):
+                    prop = {}
+                    
+                # --- THE PERFECT JSON MAPPING ---
+                enriched_data.append({
+                    'ListingID': listing_id,
+                    'Address': str(prop.get('title', 'Unknown'))[:250],
+                    'PropertyType': str(prop.get('category', 'Unknown'))[:100],
+                    'Price': prop.get('price', 0),
+                    'SquareFootage': prop.get('propertyFacts', {}).get('buildingSize', 0),
+                    'Coordinates': coords
+                })
+            
+            time.sleep(1)
+
+        df = pd.DataFrame(enriched_data)
         
         if not df.empty:
-            print(f"✅ Successfully extracted {len(df)} commercial listings.")
+            # Clean prices and sqft
+            df['Price'] = pd.to_numeric(df['Price'], errors='coerce').fillna(0)
+            df['SquareFootage'] = df['SquareFootage'].astype(str).str.replace(',', '').str.replace(' SF', '')
+            df['SquareFootage'] = pd.to_numeric(df['SquareFootage'], errors='coerce').fillna(0)
+            
+            # --- NEW: LAT/LONG PARSING ---
+            # Remove the brackets [[ ]]
+            df['Coordinates'] = df['Coordinates'].astype(str).str.replace('[', '', regex=False).str.replace(']', '', regex=False)
+            
+            # Split the string by the comma into two columns
+            # LoopNet format is usually [Longitude, Latitude]
+            df[['Longitude', 'Latitude']] = df['Coordinates'].str.split(',', expand=True)
+            
+            # Convert to float so Power BI can map them
+            df['Longitude'] = pd.to_numeric(df['Longitude'], errors='coerce')
+            df['Latitude'] = pd.to_numeric(df['Latitude'], errors='coerce')
+            # -----------------------------
+            
+            # --- NEW: SAVE TO LOCAL STAGING ---
+            # Ensure the data directory exists
+            os.makedirs('../data', exist_ok=True)
+            
+            # Save as CSV (you can also use .to_parquet('.../raw_listings.parquet'))
+            file_path = os.path.join(os.path.dirname(__file__), '..', 'data', 'raw_listings.csv')
+            df.to_csv(file_path, index=False)
+            print(f"📁 Data staged locally at: {file_path}")
+            # ----------------------------------
+            
+            print(f"✅ Pipeline complete! Enriched {len(df)} commercial listings.")
             return df
         else:
-            print("No listings found. Here is the raw response from the API to debug:")
-            print(data)
             return None
 
     except Exception as e:
@@ -56,5 +117,4 @@ def fetch_loopnet_data():
 if __name__ == "__main__":
     property_df = fetch_loopnet_data()
     if property_df is not None:
-        # Print the first 5 rows to ensure it worked
-        print(property_df.head())
+        print(property_df)
